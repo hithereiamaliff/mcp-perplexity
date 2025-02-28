@@ -1,5 +1,7 @@
 # Perplexity Search MCP
 
+[![smithery badge](https://smithery.ai/badge/@arjunkmrm/perplexity-search)](https://smithery.ai/server/@arjunkmrm/perplexity-search)
+
 A simple Model Context Protocol (MCP) server for Perplexity's web search with sonar or sonar-pro.
 
 ## Features
