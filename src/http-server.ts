@@ -14,6 +14,8 @@
 
 import express, { Request, Response } from 'express';
 import cors from 'cors';
+import fs from 'fs';
+import path from 'path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
@@ -29,6 +31,11 @@ interface PerplexityErrorResponse {
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const HOST = process.env.HOST || '0.0.0.0';
 const TIMEOUT_MS = parseInt(process.env.PERPLEXITY_TIMEOUT_MS || '300000', 10);
+
+// Analytics persistence configuration
+const ANALYTICS_DATA_DIR = process.env.ANALYTICS_DIR || '/app/data';
+const ANALYTICS_FILE = path.join(ANALYTICS_DATA_DIR, 'analytics.json');
+const SAVE_INTERVAL_MS = 60000; // Save every 60 seconds
 
 // Default config from environment
 const DEFAULT_API_KEY = process.env.PERPLEXITY_API_KEY || '';
@@ -61,7 +68,10 @@ interface Analytics {
   hourlyRequests: Record<string, number>;
 }
 
-const analytics: Analytics = {
+const MAX_RECENT_CALLS = 100;
+
+// Initialize analytics with default values
+let analytics: Analytics = {
   serverStartTime: new Date().toISOString(),
   totalRequests: 0,
   totalToolCalls: 0,
@@ -74,7 +84,59 @@ const analytics: Analytics = {
   hourlyRequests: {},
 };
 
-const MAX_RECENT_CALLS = 100;
+// Ensure data directory exists
+function ensureDataDir(): void {
+  try {
+    if (!fs.existsSync(ANALYTICS_DATA_DIR)) {
+      fs.mkdirSync(ANALYTICS_DATA_DIR, { recursive: true });
+      console.log(`📁 Created analytics data directory: ${ANALYTICS_DATA_DIR}`);
+    }
+  } catch (error) {
+    console.error(`⚠️ Failed to create analytics directory:`, error);
+  }
+}
+
+// Load analytics from disk on startup
+function loadAnalytics(): void {
+  try {
+    ensureDataDir();
+    if (fs.existsSync(ANALYTICS_FILE)) {
+      const data = fs.readFileSync(ANALYTICS_FILE, 'utf-8');
+      const loaded = JSON.parse(data) as Analytics;
+      
+      analytics = {
+        ...loaded,
+        serverStartTime: loaded.serverStartTime || new Date().toISOString(),
+      };
+      
+      console.log(`📊 Loaded analytics from ${ANALYTICS_FILE}`);
+      console.log(`   Total requests: ${analytics.totalRequests}, Tool calls: ${analytics.totalToolCalls}`);
+    } else {
+      console.log(`📊 No existing analytics file, starting fresh`);
+      saveAnalytics();
+    }
+  } catch (error) {
+    console.error(`⚠️ Failed to load analytics:`, error);
+  }
+}
+
+// Save analytics to disk
+function saveAnalytics(): void {
+  try {
+    ensureDataDir();
+    fs.writeFileSync(ANALYTICS_FILE, JSON.stringify(analytics, null, 2));
+  } catch (error) {
+    console.error(`⚠️ Failed to save analytics:`, error);
+  }
+}
+
+// Load analytics on module initialization
+loadAnalytics();
+
+// Periodic save interval
+const saveInterval = setInterval(() => {
+  saveAnalytics();
+}, SAVE_INTERVAL_MS);
 
 function trackRequest(req: Request, endpoint: string) {
   analytics.totalRequests++;
@@ -488,6 +550,89 @@ app.get('/analytics/tools', (req: Request, res: Response) => {
   });
 });
 
+// Analytics import endpoint - for restoring backups
+app.post('/analytics/import', (req: Request, res: Response) => {
+  const importKey = req.query.key as string;
+  const expectedKey = process.env.ANALYTICS_IMPORT_KEY;
+  
+  // Security: require import key if configured
+  if (expectedKey && importKey !== expectedKey) {
+    res.status(403).json({ error: 'Invalid import key' });
+    return;
+  }
+  
+  try {
+    const importData = req.body;
+    
+    // Merge imported data with current analytics
+    if (importData.summary) {
+      analytics.totalRequests += importData.summary.totalRequests || 0;
+      analytics.totalToolCalls += importData.summary.totalToolCalls || 0;
+    }
+    
+    // Merge breakdown data
+    if (importData.breakdown?.byMethod) {
+      for (const [method, count] of Object.entries(importData.breakdown.byMethod)) {
+        analytics.requestsByMethod[method] = 
+          (analytics.requestsByMethod[method] || 0) + (count as number);
+      }
+    }
+    
+    if (importData.breakdown?.byEndpoint) {
+      for (const [endpoint, count] of Object.entries(importData.breakdown.byEndpoint)) {
+        analytics.requestsByEndpoint[endpoint] = 
+          (analytics.requestsByEndpoint[endpoint] || 0) + (count as number);
+      }
+    }
+    
+    if (importData.breakdown?.byTool) {
+      for (const [tool, count] of Object.entries(importData.breakdown.byTool)) {
+        analytics.toolCalls[tool] = 
+          (analytics.toolCalls[tool] || 0) + (count as number);
+      }
+    }
+    
+    // Merge client data
+    if (importData.clients?.byIp) {
+      for (const [ip, count] of Object.entries(importData.clients.byIp)) {
+        analytics.clientsByIp[ip] = 
+          (analytics.clientsByIp[ip] || 0) + (count as number);
+      }
+    }
+    
+    if (importData.clients?.byUserAgent) {
+      for (const [ua, count] of Object.entries(importData.clients.byUserAgent)) {
+        analytics.clientsByUserAgent[ua] = 
+          (analytics.clientsByUserAgent[ua] || 0) + (count as number);
+      }
+    }
+    
+    // Merge hourly requests
+    if (importData.hourlyRequests) {
+      for (const [hour, count] of Object.entries(importData.hourlyRequests)) {
+        analytics.hourlyRequests[hour] = 
+          (analytics.hourlyRequests[hour] || 0) + (count as number);
+      }
+    }
+    
+    // Save immediately
+    saveAnalytics();
+    
+    res.json({ 
+      message: 'Analytics imported successfully',
+      currentStats: {
+        totalRequests: analytics.totalRequests,
+        totalToolCalls: analytics.totalToolCalls,
+      }
+    });
+  } catch (error) {
+    res.status(400).json({ 
+      error: 'Failed to import analytics', 
+      details: String(error) 
+    });
+  }
+});
+
 // Analytics dashboard - visual HTML page
 app.get('/analytics/dashboard', (req: Request, res: Response) => {
   trackRequest(req, '/analytics/dashboard');
@@ -520,12 +665,22 @@ app.get('/analytics/dashboard', (req: Request, res: Response) => {
     }
     header h1 {
       font-size: 2rem;
-      background: linear-gradient(90deg, #60a5fa, #a78bfa);
+      background: linear-gradient(90deg, #3b82f6, #8b5cf6);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
+      background-clip: text;
       margin-bottom: 8px;
     }
     header p { color: #a1a1aa; }
+    .uptime-badge {
+      display: inline-block;
+      background: rgba(59, 130, 246, 0.2);
+      color: #3b82f6;
+      padding: 4px 12px;
+      border-radius: 50px;
+      font-size: 0.85rem;
+      margin-top: 8px;
+    }
     .stats-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -541,8 +696,8 @@ app.get('/analytics/dashboard', (req: Request, res: Response) => {
       transition: transform 0.2s;
     }
     .stat-card:hover { transform: translateY(-2px); }
-    .stat-card h3 { color: #a1a1aa; font-size: 0.875rem; margin-bottom: 8px; }
-    .stat-card .value { font-size: 2rem; font-weight: bold; color: #60a5fa; }
+    .stat-card .stat-label { color: #a1a1aa; font-size: 0.85rem; margin-bottom: 8px; }
+    .stat-card .stat-value { font-size: 2rem; font-weight: bold; color: #3b82f6; }
     .charts-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
@@ -555,24 +710,48 @@ app.get('/analytics/dashboard', (req: Request, res: Response) => {
       padding: 20px;
       border: 1px solid rgba(255,255,255,0.1);
     }
-    .chart-card h3 { margin-bottom: 16px; color: #e4e4e7; }
+    .chart-card h3 { margin-bottom: 16px; color: #e4e4e7; font-size: 1.1rem; }
+    .chart-container { position: relative; height: 250px; }
     .recent-calls {
       background: rgba(255,255,255,0.05);
       border-radius: 12px;
       padding: 20px;
       border: 1px solid rgba(255,255,255,0.1);
+      margin-bottom: 30px;
     }
-    .recent-calls h3 { margin-bottom: 16px; }
+    .recent-calls h3 { margin-bottom: 16px; font-size: 1.1rem; }
+    .call-list { max-height: 400px; overflow-y: auto; }
     .call-item {
       display: flex;
       justify-content: space-between;
+      align-items: center;
       padding: 12px;
       border-bottom: 1px solid rgba(255,255,255,0.1);
     }
     .call-item:last-child { border-bottom: none; }
-    .call-tool { color: #60a5fa; font-weight: 500; }
-    .call-time { color: #a1a1aa; font-size: 0.875rem; }
+    .call-tool { color: #3b82f6; font-weight: 500; }
+    .call-time { color: #71717a; font-size: 0.8rem; }
+    .call-ip { color: #a1a1aa; font-size: 0.75rem; }
     .loading { text-align: center; padding: 40px; color: #a1a1aa; }
+    .refresh-btn {
+      position: fixed;
+      bottom: 30px;
+      right: 30px;
+      background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 50px;
+      cursor: pointer;
+      font-size: 1rem;
+      box-shadow: 0 4px 15px rgba(59, 130, 246, 0.4);
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+    .refresh-btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(59, 130, 246, 0.5);
+    }
+    .no-data { color: #71717a; padding: 20px; text-align: center; }
   </style>
 </head>
 <body>
@@ -580,105 +759,186 @@ app.get('/analytics/dashboard', (req: Request, res: Response) => {
     <header>
       <h1>🔍 Perplexity MCP Analytics</h1>
       <p>Real-time usage statistics</p>
+      <span class="uptime-badge" id="uptime">Loading...</span>
     </header>
     
     <div id="content" class="loading">Loading analytics...</div>
   </div>
+  
+  <button class="refresh-btn" onclick="loadData()">🔄 Refresh</button>
 
   <script>
+    const chartColors = ['#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#f43f5e', '#84cc16'];
+    let toolsChart, hourlyChart, endpointChart, clientsChart;
+    
     async function loadData() {
       try {
         const basePath = window.location.pathname.replace(/\\/analytics\\/dashboard\\/?$/, '');
         const res = await fetch(basePath + '/analytics');
         const data = await res.json();
         
+        document.getElementById('uptime').textContent = '⏱️ ' + data.uptime;
+        
         document.getElementById('content').innerHTML = \`
           <div class="stats-grid">
             <div class="stat-card">
-              <h3>Total Requests</h3>
-              <div class="value">\${data.summary.totalRequests.toLocaleString()}</div>
+              <div class="stat-label">Total Requests</div>
+              <div class="stat-value">\${data.summary.totalRequests.toLocaleString()}</div>
             </div>
             <div class="stat-card">
-              <h3>Tool Calls</h3>
-              <div class="value">\${data.summary.totalToolCalls.toLocaleString()}</div>
+              <div class="stat-label">Tool Calls</div>
+              <div class="stat-value">\${data.summary.totalToolCalls.toLocaleString()}</div>
             </div>
             <div class="stat-card">
-              <h3>Unique Clients</h3>
-              <div class="value">\${data.summary.uniqueClients.toLocaleString()}</div>
+              <div class="stat-label">Unique Clients</div>
+              <div class="stat-value">\${data.summary.uniqueClients.toLocaleString()}</div>
             </div>
             <div class="stat-card">
-              <h3>Uptime</h3>
-              <div class="value">\${data.uptime}</div>
+              <div class="stat-label">Most Used Tool</div>
+              <div class="stat-value" style="font-size:1rem;">\${Object.keys(data.breakdown.byTool)[0] || 'N/A'}</div>
             </div>
           </div>
           
           <div class="charts-grid">
             <div class="chart-card">
-              <h3>Tool Usage</h3>
-              <canvas id="toolChart"></canvas>
+              <h3>📊 Tool Usage Distribution</h3>
+              <div class="chart-container"><canvas id="toolsChart"></canvas></div>
             </div>
             <div class="chart-card">
-              <h3>Hourly Requests (Last 24h)</h3>
-              <canvas id="hourlyChart"></canvas>
+              <h3>📈 Hourly Requests (Last 24h)</h3>
+              <div class="chart-container"><canvas id="hourlyChart"></canvas></div>
+            </div>
+            <div class="chart-card">
+              <h3>🔗 Requests by Endpoint</h3>
+              <div class="chart-container"><canvas id="endpointChart"></canvas></div>
+            </div>
+            <div class="chart-card">
+              <h3>👥 Top Clients by User Agent</h3>
+              <div class="chart-container"><canvas id="clientsChart"></canvas></div>
             </div>
           </div>
           
           <div class="recent-calls">
-            <h3>Recent Tool Calls</h3>
-            \${data.recentToolCalls.slice(0, 10).map(call => \`
-              <div class="call-item">
-                <span class="call-tool">\${call.tool}</span>
-                <span class="call-time">\${new Date(call.timestamp).toLocaleString()}</span>
-              </div>
-            \`).join('') || '<p style="color:#a1a1aa;padding:12px;">No tool calls yet</p>'}
+            <h3>🕐 Recent Tool Calls</h3>
+            <div class="call-list">
+              \${data.recentToolCalls.length > 0 ? data.recentToolCalls.slice(0, 15).map(call => \`
+                <div class="call-item">
+                  <div>
+                    <span class="call-tool">\${call.tool}</span>
+                    <span class="call-ip"> • \${call.clientIp}</span>
+                  </div>
+                  <span class="call-time">\${new Date(call.timestamp).toLocaleString()}</span>
+                </div>
+              \`).join('') : '<div class="no-data">No tool calls yet</div>'}
+            </div>
           </div>
         \`;
         
-        // Tool usage chart
+        // Tool usage doughnut chart
         const toolData = Object.entries(data.breakdown.byTool);
         if (toolData.length > 0) {
-          new Chart(document.getElementById('toolChart'), {
+          if (toolsChart) toolsChart.destroy();
+          toolsChart = new Chart(document.getElementById('toolsChart'), {
             type: 'doughnut',
             data: {
               labels: toolData.map(([k]) => k),
               datasets: [{
                 data: toolData.map(([, v]) => v),
-                backgroundColor: ['#60a5fa', '#a78bfa', '#34d399', '#fbbf24', '#f87171'],
+                backgroundColor: chartColors,
+                borderWidth: 0
               }]
             },
             options: {
-              plugins: { legend: { labels: { color: '#e4e4e7' } } }
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: { legend: { position: 'right', labels: { color: '#a1a1aa', font: { size: 11 } } } }
             }
           });
         }
         
-        // Hourly chart
+        // Hourly requests line chart
         const hourlyData = Object.entries(data.hourlyRequests);
         if (hourlyData.length > 0) {
-          new Chart(document.getElementById('hourlyChart'), {
+          if (hourlyChart) hourlyChart.destroy();
+          hourlyChart = new Chart(document.getElementById('hourlyChart'), {
             type: 'line',
             data: {
               labels: hourlyData.map(([k]) => k.split('T')[1] || k),
               datasets: [{
                 label: 'Requests',
                 data: hourlyData.map(([, v]) => v),
-                borderColor: '#60a5fa',
-                backgroundColor: 'rgba(96,165,250,0.1)',
+                borderColor: '#3b82f6',
+                backgroundColor: 'rgba(59, 130, 246, 0.1)',
                 fill: true,
-                tension: 0.4,
+                tension: 0.4
               }]
             },
             options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: { legend: { display: false } },
               scales: {
-                x: { ticks: { color: '#a1a1aa' }, grid: { color: 'rgba(255,255,255,0.1)' } },
-                y: { ticks: { color: '#a1a1aa' }, grid: { color: 'rgba(255,255,255,0.1)' } }
-              },
-              plugins: { legend: { labels: { color: '#e4e4e7' } } }
+                x: { ticks: { color: '#71717a' }, grid: { color: 'rgba(255,255,255,0.05)' } },
+                y: { ticks: { color: '#71717a' }, grid: { color: 'rgba(255,255,255,0.05)' }, beginAtZero: true }
+              }
+            }
+          });
+        }
+        
+        // Endpoint bar chart
+        const endpointData = Object.entries(data.breakdown.byEndpoint).sort(([,a], [,b]) => b - a).slice(0, 8);
+        if (endpointData.length > 0) {
+          if (endpointChart) endpointChart.destroy();
+          endpointChart = new Chart(document.getElementById('endpointChart'), {
+            type: 'bar',
+            data: {
+              labels: endpointData.map(([k]) => k),
+              datasets: [{
+                data: endpointData.map(([, v]) => v),
+                backgroundColor: chartColors,
+                borderRadius: 8
+              }]
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: { legend: { display: false } },
+              scales: {
+                x: { ticks: { color: '#71717a' }, grid: { display: false } },
+                y: { ticks: { color: '#71717a' }, grid: { color: 'rgba(255,255,255,0.05)' }, beginAtZero: true }
+              }
+            }
+          });
+        }
+        
+        // Clients horizontal bar chart
+        const clientData = Object.entries(data.clients.byUserAgent).sort(([,a], [,b]) => b - a).slice(0, 6);
+        if (clientData.length > 0) {
+          if (clientsChart) clientsChart.destroy();
+          clientsChart = new Chart(document.getElementById('clientsChart'), {
+            type: 'bar',
+            data: {
+              labels: clientData.map(([k]) => k.length > 25 ? k.substring(0, 25) + '...' : k),
+              datasets: [{
+                data: clientData.map(([, v]) => v),
+                backgroundColor: chartColors,
+                borderRadius: 8
+              }]
+            },
+            options: {
+              indexAxis: 'y',
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: { legend: { display: false } },
+              scales: {
+                x: { ticks: { color: '#71717a' }, grid: { color: 'rgba(255,255,255,0.05)' }, beginAtZero: true },
+                y: { ticks: { color: '#71717a' }, grid: { display: false } }
+              }
             }
           });
         }
       } catch (err) {
-        document.getElementById('content').innerHTML = '<p style="color:#f87171;">Failed to load analytics</p>';
+        document.getElementById('content').innerHTML = '<p style="color:#f87171;text-align:center;padding:40px;">Failed to load analytics</p>';
       }
     }
     
@@ -769,6 +1029,18 @@ app.get('/', (req: Request, res: Response) => {
   });
 });
 
+// Graceful shutdown handler
+function gracefulShutdown(signal: string): void {
+  console.log(`\nReceived ${signal}, shutting down gracefully...`);
+  clearInterval(saveInterval);
+  saveAnalytics();
+  console.log('💾 Analytics saved. Goodbye!');
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
 // Connect server to transport and start listening
 mcpServer.server.connect(transport)
   .then(() => {
@@ -780,6 +1052,7 @@ mcpServer.server.connect(transport)
       console.log(`📡 MCP endpoint: http://${HOST}:${PORT}/mcp`);
       console.log(`❤️  Health check: http://${HOST}:${PORT}/health`);
       console.log(`📊 Analytics: http://${HOST}:${PORT}/analytics/dashboard`);
+      console.log(`💾 Analytics file: ${ANALYTICS_FILE}`);
       console.log('='.repeat(60));
       console.log('');
       console.log('Test with MCP Inspector:');
