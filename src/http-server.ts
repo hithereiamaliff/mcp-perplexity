@@ -28,12 +28,10 @@ interface PerplexityErrorResponse {
 // Configuration
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const HOST = process.env.HOST || '0.0.0.0';
+const TIMEOUT_MS = parseInt(process.env.PERPLEXITY_TIMEOUT_MS || '300000', 10);
 
 // Default config from environment
 const DEFAULT_API_KEY = process.env.PERPLEXITY_API_KEY || '';
-const DEFAULT_MODEL = (process.env.PERPLEXITY_MODEL || 'sonar-pro') as 'sonar' | 'sonar-pro';
-const DEFAULT_MAX_TOKENS = parseInt(process.env.PERPLEXITY_MAX_TOKENS || '8192', 10);
-const DEFAULT_TEMPERATURE = parseFloat(process.env.PERPLEXITY_TEMPERATURE || '0.2');
 
 // Per-request API key storage
 let requestApiKey: string | null = null;
@@ -128,89 +126,258 @@ function getUptime(): string {
   return `${minutes}m`;
 }
 
+/**
+ * Strips thinking tokens (content within <think>...</think> tags) from the response.
+ */
+function stripThinkingTokens(content: string): string {
+  return content.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+}
+
+/**
+ * Performs a chat completion by sending a request to the Perplexity API.
+ */
+async function performChatCompletion(
+  messages: Array<{ role: string; content: string }>,
+  model: string = 'sonar-pro',
+  stripThinking: boolean = false
+): Promise<string> {
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    throw new Error('No Perplexity API key available. Please provide your API key via URL query param (?apiKey=YOUR_KEY).');
+  }
+
+  const response = await axios.post(
+    'https://api.perplexity.ai/chat/completions',
+    { model, messages },
+    {
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      timeout: TIMEOUT_MS,
+    }
+  );
+
+  let messageContent = response.data.choices[0].message.content;
+
+  if (stripThinking) {
+    messageContent = stripThinkingTokens(messageContent);
+  }
+
+  // Append citations if available
+  if (response.data.citations && Array.isArray(response.data.citations) && response.data.citations.length > 0) {
+    messageContent += '\n\nCitations:\n';
+    response.data.citations.forEach((citation: string, index: number) => {
+      messageContent += `[${index + 1}] ${citation}\n`;
+    });
+  }
+
+  return messageContent;
+}
+
+/**
+ * Performs a web search using the Perplexity Search API.
+ */
+async function performSearch(
+  query: string,
+  maxResults: number = 10,
+  country?: string
+): Promise<string> {
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    throw new Error('No Perplexity API key available. Please provide your API key via URL query param (?apiKey=YOUR_KEY).');
+  }
+
+  const body: Record<string, unknown> = {
+    query,
+    max_results: maxResults,
+  };
+
+  if (country) {
+    body.country = country;
+  }
+
+  const response = await axios.post(
+    'https://api.perplexity.ai/search',
+    body,
+    {
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      timeout: TIMEOUT_MS,
+    }
+  );
+
+  const data = response.data;
+  if (!data.results || !Array.isArray(data.results)) {
+    return 'No search results found.';
+  }
+
+  let formattedResults = `Found ${data.results.length} search results:\n\n`;
+  data.results.forEach((result: { title: string; url: string; snippet?: string; date?: string }, index: number) => {
+    formattedResults += `${index + 1}. **${result.title}**\n`;
+    formattedResults += `   URL: ${result.url}\n`;
+    if (result.snippet) {
+      formattedResults += `   ${result.snippet}\n`;
+    }
+    if (result.date) {
+      formattedResults += `   Date: ${result.date}\n`;
+    }
+    formattedResults += '\n';
+  });
+
+  return formattedResults;
+}
+
 // Create MCP server
 const mcpServer = new McpServer({
-  name: 'Perplexity Search MCP Server',
-  version: '1.0.0',
+  name: 'Perplexity MCP Server',
+  version: '1.1.0',
 });
 
-// Register the search tool
+// Tool 1: perplexity_ask - General conversational AI with web search
 mcpServer.tool(
-  'perplexity_search',
-  'Perform a web search using Perplexity\'s API, which provides detailed and contextually relevant results with citations. By default, no time filtering is applied to search results.',
+  'perplexity_ask',
+  'General-purpose conversational AI with real-time web search using the sonar-pro model. Great for quick questions and everyday searches.',
   {
-    query: z.string().describe('The search query to perform'),
-    search_recency_filter: z.enum(['month', 'week', 'day', 'hour']).optional().describe('Filter search results by recency (options: month, week, day, hour). If not specified, no time filtering is applied.'),
+    messages: z.array(z.object({
+      role: z.string().describe('Role of the message (e.g., system, user, assistant)'),
+      content: z.string().describe('The content of the message'),
+    })).describe('Array of conversation messages'),
   },
-  async ({ query, search_recency_filter }) => {
-    const apiKey = getApiKey();
-    if (!apiKey) {
-      return {
-        content: [{
-          type: 'text' as const,
-          text: 'Error: No Perplexity API key available. Please provide your API key via URL query param (?apiKey=YOUR_KEY) or contact the server administrator.',
-        }],
-        isError: true,
-      };
-    }
-
+  async ({ messages }) => {
     try {
-      const payload: Record<string, unknown> = {
-        model: DEFAULT_MODEL,
-        messages: [
-          {
-            role: 'user',
-            content: query,
-          },
-        ],
-        max_tokens: DEFAULT_MAX_TOKENS,
-        temperature: DEFAULT_TEMPERATURE,
-      };
-
-      if (search_recency_filter) {
-        payload.search_recency_filter = search_recency_filter;
-      }
-
-      console.log(`Perplexity search: model=${DEFAULT_MODEL}, query="${query.substring(0, 50)}..."`);
-
-      const response = await axios.post('https://api.perplexity.ai/chat/completions', payload, {
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-        },
-      });
-
-      const formattedResponse = {
-        content: response.data.choices[0].message.content,
-        citations: response.data.citations || [],
-      };
-
+      const result = await performChatCompletion(messages, 'sonar-pro');
       return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify(formattedResponse, null, 2),
-        }],
+        content: [{ type: 'text' as const, text: result }],
       };
     } catch (error: unknown) {
       if (axios.isAxiosError(error)) {
         const axiosError = error as AxiosError<PerplexityErrorResponse>;
         const errorData = axiosError.response?.data;
         const errorMessage = errorData?.error || errorData?.message || axiosError.message;
-
         return {
-          content: [{
-            type: 'text' as const,
-            text: `Perplexity API error: ${errorMessage}`,
-          }],
+          content: [{ type: 'text' as const, text: `Perplexity API error: ${errorMessage}` }],
           isError: true,
         };
       }
-      throw error;
+      return {
+        content: [{ type: 'text' as const, text: `Error: ${error instanceof Error ? error.message : 'Unknown error'}` }],
+        isError: true,
+      };
     }
   }
 );
 
-// Register hello tool for testing
+// Tool 2: perplexity_research - Deep comprehensive research
+mcpServer.tool(
+  'perplexity_research',
+  'Deep, comprehensive research using the sonar-deep-research model. Ideal for thorough analysis and detailed reports.',
+  {
+    messages: z.array(z.object({
+      role: z.string().describe('Role of the message (e.g., system, user, assistant)'),
+      content: z.string().describe('The content of the message'),
+    })).describe('Array of conversation messages'),
+    strip_thinking: z.boolean().optional().describe('If true, removes <think>...</think> tags from the response to save context tokens. Default is false.'),
+  },
+  async ({ messages, strip_thinking }) => {
+    try {
+      const stripThinking = typeof strip_thinking === 'boolean' ? strip_thinking : false;
+      const result = await performChatCompletion(messages, 'sonar-deep-research', stripThinking);
+      return {
+        content: [{ type: 'text' as const, text: result }],
+      };
+    } catch (error: unknown) {
+      if (axios.isAxiosError(error)) {
+        const axiosError = error as AxiosError<PerplexityErrorResponse>;
+        const errorData = axiosError.response?.data;
+        const errorMessage = errorData?.error || errorData?.message || axiosError.message;
+        return {
+          content: [{ type: 'text' as const, text: `Perplexity API error: ${errorMessage}` }],
+          isError: true,
+        };
+      }
+      return {
+        content: [{ type: 'text' as const, text: `Error: ${error instanceof Error ? error.message : 'Unknown error'}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool 3: perplexity_reason - Advanced reasoning and problem-solving
+mcpServer.tool(
+  'perplexity_reason',
+  'Advanced reasoning and problem-solving using the sonar-reasoning-pro model. Perfect for complex analytical tasks.',
+  {
+    messages: z.array(z.object({
+      role: z.string().describe('Role of the message (e.g., system, user, assistant)'),
+      content: z.string().describe('The content of the message'),
+    })).describe('Array of conversation messages'),
+    strip_thinking: z.boolean().optional().describe('If true, removes <think>...</think> tags from the response to save context tokens. Default is false.'),
+  },
+  async ({ messages, strip_thinking }) => {
+    try {
+      const stripThinking = typeof strip_thinking === 'boolean' ? strip_thinking : false;
+      const result = await performChatCompletion(messages, 'sonar-reasoning-pro', stripThinking);
+      return {
+        content: [{ type: 'text' as const, text: result }],
+      };
+    } catch (error: unknown) {
+      if (axios.isAxiosError(error)) {
+        const axiosError = error as AxiosError<PerplexityErrorResponse>;
+        const errorData = axiosError.response?.data;
+        const errorMessage = errorData?.error || errorData?.message || axiosError.message;
+        return {
+          content: [{ type: 'text' as const, text: `Perplexity API error: ${errorMessage}` }],
+          isError: true,
+        };
+      }
+      return {
+        content: [{ type: 'text' as const, text: `Error: ${error instanceof Error ? error.message : 'Unknown error'}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool 4: perplexity_search - Direct web search using Search API
+mcpServer.tool(
+  'perplexity_search',
+  'Direct web search using the Perplexity Search API. Returns ranked search results with titles, URLs, snippets, and metadata. Perfect for finding up-to-date facts, news, or specific information.',
+  {
+    query: z.string().describe('Search query string'),
+    max_results: z.number().min(1).max(20).optional().describe('Maximum number of results to return (1-20, default: 10)'),
+    country: z.string().optional().describe('ISO 3166-1 alpha-2 country code for regional results (e.g., US, GB, MY)'),
+  },
+  async ({ query, max_results, country }) => {
+    try {
+      const maxResults = typeof max_results === 'number' ? max_results : 10;
+      const countryCode = typeof country === 'string' ? country : undefined;
+      const result = await performSearch(query, maxResults, countryCode);
+      return {
+        content: [{ type: 'text' as const, text: result }],
+      };
+    } catch (error: unknown) {
+      if (axios.isAxiosError(error)) {
+        const axiosError = error as AxiosError<PerplexityErrorResponse>;
+        const errorData = axiosError.response?.data;
+        const errorMessage = errorData?.error || errorData?.message || axiosError.message;
+        return {
+          content: [{ type: 'text' as const, text: `Perplexity Search API error: ${errorMessage}` }],
+          isError: true,
+        };
+      }
+      return {
+        content: [{ type: 'text' as const, text: `Error: ${error instanceof Error ? error.message : 'Unknown error'}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool 5: perplexity_hello - Test tool
 mcpServer.tool(
   'perplexity_hello',
   'A simple test tool to verify that the MCP server is working correctly',
@@ -220,11 +387,11 @@ mcpServer.tool(
       content: [{
         type: 'text' as const,
         text: JSON.stringify({
-          message: 'Hello from Perplexity Search MCP Server!',
+          message: 'Hello from Perplexity MCP Server!',
           timestamp: new Date().toISOString(),
           transport: 'streamable-http',
           hasApiKey: !!getApiKey(),
-          model: DEFAULT_MODEL,
+          availableTools: ['perplexity_ask', 'perplexity_research', 'perplexity_reason', 'perplexity_search'],
         }, null, 2),
       }],
     };
@@ -249,11 +416,12 @@ app.get('/health', (req: Request, res: Response) => {
   trackRequest(req, '/health');
   res.json({
     status: 'healthy',
-    server: 'Perplexity Search MCP',
-    version: '1.0.0',
+    server: 'Perplexity MCP Server',
+    version: '1.1.0',
     transport: 'streamable-http',
     timestamp: new Date().toISOString(),
     hasDefaultApiKey: !!DEFAULT_API_KEY,
+    tools: ['perplexity_ask', 'perplexity_research', 'perplexity_reason', 'perplexity_search'],
   });
 });
 
@@ -575,10 +743,16 @@ app.all('/mcp', async (req: Request, res: Response) => {
 app.get('/', (req: Request, res: Response) => {
   trackRequest(req, '/');
   res.json({
-    name: 'Perplexity Search MCP Server',
-    version: '1.0.0',
-    description: 'MCP server for Perplexity web search API',
+    name: 'Perplexity MCP Server',
+    version: '1.1.0',
+    description: 'MCP server for Perplexity API - search, ask, research, and reasoning',
     transport: 'streamable-http',
+    tools: {
+      perplexity_ask: 'General conversational AI with web search (sonar-pro)',
+      perplexity_research: 'Deep comprehensive research (sonar-deep-research)',
+      perplexity_reason: 'Advanced reasoning and problem-solving (sonar-reasoning-pro)',
+      perplexity_search: 'Direct web search with ranked results (Search API)',
+    },
     endpoints: {
       mcp: '/mcp',
       health: '/health',
@@ -600,7 +774,7 @@ mcpServer.server.connect(transport)
   .then(() => {
     app.listen(PORT, HOST, () => {
       console.log('='.repeat(60));
-      console.log('🔍 Perplexity Search MCP Server (Streamable HTTP)');
+      console.log('🔍 Perplexity MCP Server (Streamable HTTP)');
       console.log('='.repeat(60));
       console.log(`📍 Server running on http://${HOST}:${PORT}`);
       console.log(`📡 MCP endpoint: http://${HOST}:${PORT}/mcp`);
