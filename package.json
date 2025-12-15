@@ -9,19 +9,26 @@
   "module": "./src/index.ts",
   "scripts": {
     "build": "npx @smithery/cli build",
+    "build:tsc": "tsc",
     "dev": "npx @smithery/cli dev",
-    "postbuild": "shx test -e dist/*.js && shx chmod +x dist/*.js || true",
+    "dev:http": "npx tsx src/http-server.ts",
+    "start:http": "node dist/http-server.js",
+    "postbuild": "shx test -e dist/*.js && shx chmod +x dist/*.js || echo done",
     "prepare": "npm run build",
     "watch": "tsc --watch"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.17.4",
     "axios": "^1.6.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.0",
     "zod": "^3.23.8",
     "zod-to-json-schema": "^3.23.5"
   },
   "devDependencies": {
     "@smithery/cli": "^1.2.20",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
     "@types/jest": "^29.5.14",
     "@types/node": "^20.11.0",
     "jest": "^29.7.0",
