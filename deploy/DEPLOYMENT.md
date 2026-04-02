@@ -46,23 +46,30 @@ cd /opt/mcp-servers/perplexity
 git clone https://github.com/hithereiamaliff/mcp-perplexity.git .
 ```
 
-### 4. Create environment file (optional)
-
-If you want a default Perplexity API key for all requests:
+### 4. Create environment file
 
 ```bash
 nano .env
 ```
 
-Add your Perplexity API key:
+**Option A — Hosted key-service mode** (recommended for production):
+
 ```env
-PERPLEXITY_API_KEY=pplx-your_api_key_here
-PERPLEXITY_MODEL=sonar-pro
-PERPLEXITY_MAX_TOKENS=8192
-PERPLEXITY_TEMPERATURE=0.2
+KEY_SERVICE_URL=https://mcpkeys.techmavie.digital/internal/resolve
+KEY_SERVICE_TOKEN=<unique-token-for-perplexity-server>
 ```
 
-> **Note:** Users can also provide their own API key via `?apiKey=` query parameter or `X-API-Key` header.
+Users authenticate with `usr_xxx` keys issued by the key service portal. The server resolves these to actual Perplexity credentials at request time.
+
+**Option B — Self-hosted mode** (direct API key):
+
+```env
+PERPLEXITY_API_KEY=pplx-your_api_key_here
+```
+
+Users can also provide their own API key via `?apiKey=` query parameter or `X-API-Key` header.
+
+> **Note:** If both `KEY_SERVICE_URL`/`KEY_SERVICE_TOKEN` and `PERPLEXITY_API_KEY` are set, key-service mode takes priority.
 
 ### 5. Build and start the Docker container
 
@@ -115,9 +122,20 @@ curl -X POST "https://mcp.techmavie.digital/perplexity/mcp?apiKey=YOUR_PERPLEXIT
 
 ## Client Configuration
 
-### For Claude Desktop / Cursor / Windsurf
+### Hosted Key-Service Mode (usr_xxx keys)
 
-Add to your MCP configuration:
+```json
+{
+  "mcpServers": {
+    "perplexity": {
+      "transport": "streamable-http",
+      "url": "https://mcp.techmavie.digital/perplexity/mcp/usr_XXXXXXXX"
+    }
+  }
+}
+```
+
+### Self-Hosted Mode (direct API key)
 
 ```json
 {
@@ -135,18 +153,39 @@ Add to your MCP configuration:
 ```bash
 npx @modelcontextprotocol/inspector
 # Select "Streamable HTTP"
-# Enter URL: https://mcp.techmavie.digital/perplexity/mcp?apiKey=YOUR_PERPLEXITY_API_KEY
+# Hosted mode:     https://mcp.techmavie.digital/perplexity/mcp/usr_XXXXXXXX
+# Self-hosted mode: https://mcp.techmavie.digital/perplexity/mcp?apiKey=YOUR_KEY
 ```
 
 ## Authentication
 
-The server supports three ways to provide a Perplexity API key:
+The server auto-detects three startup modes:
 
-1. **Query Parameter** (recommended for clients): `?apiKey=YOUR_KEY`
-2. **Header**: `X-API-Key: YOUR_KEY`
-3. **Environment Variable**: `PERPLEXITY_API_KEY` (server default)
+### Hosted Key-Service Mode
 
-If no API key is provided, the server returns an error message.
+When `KEY_SERVICE_URL` and `KEY_SERVICE_TOKEN` are set, users authenticate with `usr_xxx` keys:
+
+1. **Path-based** (recommended): `/mcp/usr_XXXXXXXX`
+2. **Query Parameter**: `?api_key=usr_XXXXXXXX` (or `?apiKey=usr_XXXXXXXX`)
+3. **Header**: `X-API-Key: usr_XXXXXXXX`
+
+The server resolves the user key to Perplexity credentials via the key service.
+
+### Self-Hosted Mode
+
+When `PERPLEXITY_API_KEY` is set, users provide direct Perplexity API keys:
+
+1. **Query Parameter**: `?apiKey=YOUR_PERPLEXITY_KEY`
+2. **Header**: `X-API-Key: YOUR_PERPLEXITY_KEY`
+3. **Environment Variable**: `PERPLEXITY_API_KEY` (server default fallback)
+
+### Open Mode
+
+When neither the key service nor `PERPLEXITY_API_KEY` is configured:
+
+1. **The MCP endpoint stays reachable** for tool discovery
+2. **`perplexity_hello` works without a key**
+3. **API-dependent tools require a direct Perplexity key per request** via `?apiKey=YOUR_PERPLEXITY_KEY` or `X-API-Key: YOUR_PERPLEXITY_KEY`
 
 ## Management Commands
 
@@ -197,10 +236,11 @@ Set these in your repository settings (Settings → Secrets and variables → Ac
 |----------|---------|-------------|
 | `PORT` | 8080 | HTTP server port (internal) |
 | `HOST` | 0.0.0.0 | Bind address |
-| `PERPLEXITY_API_KEY` | (optional) | Default Perplexity API key |
-| `PERPLEXITY_MODEL` | sonar-pro | Model to use (sonar or sonar-pro) |
-| `PERPLEXITY_MAX_TOKENS` | 8192 | Maximum tokens for response |
-| `PERPLEXITY_TEMPERATURE` | 0.2 | Temperature for response generation |
+| `PERPLEXITY_API_KEY` | (optional) | Default Perplexity API key (self-hosted mode) |
+| `KEY_SERVICE_URL` | (optional) | Key service resolve endpoint URL |
+| `KEY_SERVICE_TOKEN` | (optional) | Bearer token for this server's key service auth |
+| `PERPLEXITY_TIMEOUT_MS` | 300000 | API call timeout in milliseconds |
+| `ANALYTICS_DIR` | /app/data | Directory for analytics persistence |
 
 ## Port Allocation
 

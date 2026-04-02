@@ -42,11 +42,11 @@ The original fork only had a single `search` tool. This version now includes **4
   - Recent tool calls feed
   - Unique client tracking
 
-### Enhanced API Key Handling
+### Centralized Key Service Integration
 
-- **Query Parameter**: `?apiKey=YOUR_KEY` (recommended for MCP clients)
-- **Header**: `X-API-Key: YOUR_KEY`
-- **Environment Variable**: `PERPLEXITY_API_KEY` (server default)
+- **Key Service mode**: Users authenticate with `usr_xxx` keys via `/mcp/usr_xxx` or `?api_key=usr_xxx`
+- **Self-hosted mode**: Direct Perplexity API key via `?apiKey=YOUR_KEY` or `X-API-Key` header
+- **Environment Variable**: `PERPLEXITY_API_KEY` (server default fallback)
 
 ### Additional Features
 
@@ -61,9 +61,24 @@ The original fork only had a single `search` tool. This version now includes **4
 
 The easiest way to use this MCP server is via the hosted endpoint. **No installation required!**
 
-### Client Configuration
+### Option A: Via Key Service (Recommended)
 
-For Claude Desktop / Cursor / Windsurf, add to your MCP configuration:
+Register your Perplexity API key at the [TechMavie Key Service Portal](https://mcpkeys.techmavie.digital) to get a `usr_xxx` key, then configure your MCP client:
+
+```json
+{
+  "mcpServers": {
+    "perplexity": {
+      "transport": "streamable-http",
+      "url": "https://mcp.techmavie.digital/perplexity/mcp/usr_XXXXXXXX"
+    }
+  }
+}
+```
+
+### Option B: Direct API Key
+
+Provide your Perplexity API key directly:
 
 ```json
 {
@@ -83,13 +98,19 @@ For Claude Desktop / Cursor / Windsurf, add to your MCP configuration:
 ```bash
 npx @modelcontextprotocol/inspector
 # Select "Streamable HTTP"
-# Enter URL: https://mcp.techmavie.digital/perplexity/mcp?apiKey=YOUR_PERPLEXITY_API_KEY
+# Key service:  https://mcp.techmavie.digital/perplexity/mcp/usr_XXXXXXXX
+# Direct key:   https://mcp.techmavie.digital/perplexity/mcp?apiKey=YOUR_KEY
 ```
 
 ### Test with curl
 
 ```bash
-# List all available tools
+# List all available tools (key-service mode)
+curl -X POST "https://mcp.techmavie.digital/perplexity/mcp/usr_XXXXXXXX" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+
+# List all available tools (direct key mode)
 curl -X POST "https://mcp.techmavie.digital/perplexity/mcp?apiKey=YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
@@ -103,21 +124,6 @@ curl -X POST "https://mcp.techmavie.digital/perplexity/mcp?apiKey=YOUR_API_KEY" 
 curl -X POST "https://mcp.techmavie.digital/perplexity/mcp?apiKey=YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"perplexity_search","arguments":{"query":"What is MCP?"}}}'
-
-# Ask a question
-curl -X POST "https://mcp.techmavie.digital/perplexity/mcp?apiKey=YOUR_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"perplexity_ask","arguments":{"messages":[{"role":"user","content":"What is MCP?"}]}}}'
-
-# Perform research
-curl -X POST "https://mcp.techmavie.digital/perplexity/mcp?apiKey=YOUR_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"perplexity_research","arguments":{"messages":[{"role":"user","content":"What is MCP?"}]}}}'
-
-# Reason and solve a problem
-curl -X POST "https://mcp.techmavie.digital/perplexity/mcp?apiKey=YOUR_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"perplexity_reason","arguments":{"messages":[{"role":"user","content":"What is MCP?"}]}}}'
 ```
 
 ## Features
@@ -167,11 +173,31 @@ A simple test tool to verify that the MCP server is working correctly.
 
 ## Authentication
 
-The server supports three ways to provide a Perplexity API key:
+The server auto-detects three startup modes:
 
-1. **Query Parameter** (recommended): `?apiKey=YOUR_KEY`
-2. **Header**: `X-API-Key: YOUR_KEY`
+### Hosted Key-Service Mode
+
+When `KEY_SERVICE_URL` and `KEY_SERVICE_TOKEN` are configured, users authenticate with `usr_xxx` keys:
+
+1. **Path-based** (recommended): `/mcp/usr_XXXXXXXX`
+2. **Query Parameter**: `?api_key=usr_XXXXXXXX` (or `?apiKey=usr_XXXXXXXX`)
+3. **Header**: `X-API-Key: usr_XXXXXXXX`
+
+### Self-Hosted Mode
+
+When `PERPLEXITY_API_KEY` is set:
+
+1. **Query Parameter**: `?apiKey=YOUR_PERPLEXITY_KEY`
+2. **Header**: `X-API-Key: YOUR_PERPLEXITY_KEY`
 3. **Environment Variable**: `PERPLEXITY_API_KEY` (server default)
+
+### Open Mode
+
+When neither the key service nor `PERPLEXITY_API_KEY` is configured:
+
+1. **Tool discovery still works** at `/mcp`
+2. **`perplexity_hello` still works** without any key
+3. **API-dependent tools require a direct Perplexity key per request** via `?apiKey=YOUR_PERPLEXITY_KEY` or `X-API-Key: YOUR_PERPLEXITY_KEY`
 
 ## Self-Hosting (VPS)
 
@@ -208,7 +234,9 @@ curl http://localhost:8080/health
 ```
 ├── src/
 │   ├── index.ts              # Main MCP server entry point (Smithery)
-│   └── http-server.ts        # Streamable HTTP server for VPS
+│   ├── http-server.ts        # Streamable HTTP server for VPS
+│   └── utils/
+│       └── key-service.ts    # Key service resolver (usr_xxx → credentials)
 ├── deploy/
 │   ├── DEPLOYMENT.md         # VPS deployment guide
 │   └── nginx-mcp.conf        # Nginx reverse proxy config
