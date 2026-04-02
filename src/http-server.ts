@@ -320,7 +320,8 @@ function createPerplexityMcpServer(apiKey: string): McpServer {
     if (axios.isAxiosError(error)) {
       const axiosError = error as AxiosError<PerplexityErrorResponse>;
       const errorData = axiosError.response?.data;
-      const errorMessage = errorData?.error || errorData?.message || axiosError.message;
+      const raw = errorData?.error || errorData?.message || axiosError.message;
+      const errorMessage = typeof raw === 'string' ? raw : JSON.stringify(raw);
       return {
         content: [{ type: 'text' as const, text: `${label} error: ${errorMessage}` }],
         isError: true as const,
